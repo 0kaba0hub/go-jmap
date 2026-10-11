@@ -1,0 +1,257 @@
+name: Sync upstream rockorager/go-jmap
+
+# Keeps this fork in step with git.sr.ht/~rockorager/go-jmap, the module's
+# own repository (the GitHub repository of the same name stopped in 2023 and
+# carries a commit the module does not, so it is not the upstream):
+#   1. Fast-forwards `main` (clean mirror) to upstream's `main` tip daily.
+#   2. Rebases `yarilo-patches` (= main + our patches + this workflow) onto the
+#      new `main`. On clean rebase: force-push with lease. On conflict: open an
+#      issue tagged `upstream-conflict` so we notice.
+#   3. Checks whether upstream main holds the commit or tag each patch in the
+#      watch list waits for; when it does, opens an issue with the next step.
+#
+# Triggered daily (06:00 UTC) and on demand via workflow_dispatch.
+# All ops run inside this fork; no upstream write access needed.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  mirror-main:
+    name: Fast-forward main from upstream
+    runs-on: ubuntu-latest
+    outputs:
+      advanced: ${{ steps.advance.outputs.advanced }}
+      old_sha: ${{ steps.advance.outputs.old_sha }}
+      new_sha: ${{ steps.advance.outputs.new_sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name 'yarilo-sync-bot'
+          git config user.email 'yarilo-sync-bot@users.noreply.github.com'
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://git.sr.ht/~rockorager/go-jmap
+          git fetch upstream main --tags
+
+      - name: Detect divergence and advance main
+        id: advance
+        run: |
+          OLD=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main)
+          echo "old_sha=$OLD" >> "$GITHUB_OUTPUT"
+          echo "new_sha=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          if [ "$OLD" = "$UPSTREAM" ]; then
+            echo "advanced=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::main already at upstream tip ($OLD)"
+            exit 0
+          fi
+          # Refuse if our main has commits upstream does not (mirror invariant).
+          if ! git merge-base --is-ancestor HEAD upstream/main; then
+            echo "::error::main mirror has diverged from upstream/main — manual fix required"
+            exit 1
+          fi
+          AHEAD=$(git rev-list --count "$OLD..$UPSTREAM")
+          echo "::notice::Fast-forwarding main by $AHEAD commit(s): $OLD -> $UPSTREAM"
+          git merge --ff-only upstream/main
+          git push origin main
+          echo "advanced=true" >> "$GITHUB_OUTPUT"
+
+  rebase-patches:
+    name: Rebase yarilo-patches onto main
+    needs: mirror-main
+    if: needs.mirror-main.outputs.advanced == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: yarilo-patches
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name 'yarilo-sync-bot'
+          git config user.email 'yarilo-sync-bot@users.noreply.github.com'
+
+      - name: Fetch updated main
+        run: git fetch origin main
+
+      - name: Attempt rebase
+        id: rebase
+        run: |
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::yarilo-patches already on top of main — no rebase needed"
+            exit 0
+          fi
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          if git -c rerere.enabled=true rebase origin/main; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            git rebase --abort || true
+          fi
+
+      - name: Push rebased branch
+        if: steps.rebase.outputs.needed == 'true' && steps.rebase.outputs.ok == 'true'
+        run: |
+          git push --force-with-lease origin yarilo-patches
+          echo "::notice::yarilo-patches rebased and force-pushed"
+
+      - name: Open conflict issue
+        if: steps.rebase.outputs.needed == 'true' && steps.rebase.outputs.ok == 'false'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const oldSha = '${{ needs.mirror-main.outputs.old_sha }}';
+            const newSha = '${{ needs.mirror-main.outputs.new_sha }}';
+            const title = `upstream-sync: yarilo-patches rebase conflict (main ${newSha.slice(0,7)})`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'upstream-conflict',
+            });
+            if (existing.data.some(i => i.title.startsWith('upstream-sync: yarilo-patches rebase conflict'))) {
+              core.info('Conflict issue already open — skipping');
+              return;
+            }
+            const compareUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/compare/${oldSha}...${newSha}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['upstream-conflict', 'automation'],
+              body: [
+                '**Automated rebase failed.**',
+                '',
+                `\`main\` advanced from \`${oldSha}\` to \`${newSha}\` ([compare](${compareUrl})), but rebasing \`yarilo-patches\` on top produced conflicts.`,
+                '',
+                'Manual steps:',
+                '```',
+                'git fetch origin',
+                'git checkout yarilo-patches',
+                'git rebase origin/main',
+                '# resolve conflicts, then:',
+                'git push --force-with-lease origin yarilo-patches',
+                '```',
+                '',
+                'After resolving, remember to bump the yarilo `go.mod` replace pseudo-version to the new tip.',
+              ].join('\n'),
+            });
+
+  # The watch list, one JSON array of {want, topic}: `want` is the upstream
+  # commit (full sha) or tag our patch waits for. Upstream takes patches by
+  # mail on sr.ht, so there is no pull request to poll; the answer is whether
+  # sr.ht's main holds the change. A row goes in with every cherry-pick, the
+  # same day it lands in YARILO_PATCHES.md: a patch in the table and not in
+  # this list is a patch nobody is watching. Empty while there are no patches;
+  # an empty matrix is an error in Actions, so watch-upstream is skipped.
+  watch-list:
+    runs-on: ubuntu-latest
+    outputs:
+      rows: ${{ steps.list.outputs.rows }}
+    steps:
+      - id: list
+        run: echo 'rows=[]' >> "$GITHUB_OUTPUT"
+
+  watch-upstream:
+    name: Watch upstream for ${{ matrix.row.topic }}
+    needs: watch-list
+    if: needs.watch-list.outputs.rows != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        row: ${{ fromJSON(needs.watch-list.outputs.rows) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch upstream with tags
+        run: |
+          git remote add upstream https://git.sr.ht/~rockorager/go-jmap
+          git fetch upstream main --tags
+
+      - name: Has upstream taken it?
+        id: check
+        env:
+          WANT: ${{ matrix.row.want }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${WANT}" >/dev/null; then
+            echo "landed=true" >> "$GITHUB_OUTPUT"
+            echo "at=tag ${WANT}" >> "$GITHUB_OUTPUT"
+          elif git cat-file -e "${WANT}^{commit}" 2>/dev/null &&
+               git merge-base --is-ancestor "${WANT}" upstream/main; then
+            echo "landed=true" >> "$GITHUB_OUTPUT"
+            echo "at=commit ${WANT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "landed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${WANT} is not in upstream main yet"
+          fi
+
+      - name: Open the drop issue
+        if: steps.check.outputs.landed == 'true'
+        uses: actions/github-script@v8
+        env:
+          AT: ${{ steps.check.outputs.at }}
+          TOPIC: ${{ matrix.row.topic }}
+        with:
+          script: |
+            const at = process.env.AT;
+            const topic = process.env.TOPIC;
+            const title = `upstream-sync: upstream has ${at} (${topic}) — drop our cherry-pick`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              labels: 'automation',
+              per_page: 100,
+            });
+            if (existing.data.some(i => i.title === title)) {
+              core.info('Tracking issue already exists — skipping');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['automation'],
+              body: [
+                `Upstream \`git.sr.ht/~rockorager/go-jmap\` main now holds ${at}, which our patch for ${topic} waits for.`,
+                '',
+                'Action items:',
+                '- [ ] Drop the cherry-pick from `yarilo-patches`.',
+                '- [ ] Remove the row from `YARILO_PATCHES.md` and from the watch list.',
+                '- [ ] In yarilo `go.mod`, repoint `replace` to the upstream commit, or drop it when no patches remain and upstream tags a version we can use.',
+              ].join('\n'),
+            });
+
+  # GitHub disables a scheduled workflow after 60 days without repository
+  # activity; a quiet upstream means no pushes, so the schedule re-enables itself.
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep the schedule alive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/sync-upstream.yml/enable"
