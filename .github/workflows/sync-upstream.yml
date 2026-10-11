@@ -7,8 +7,8 @@ name: Sync upstream rockorager/go-jmap
 #   2. Rebases `yarilo-patches` (= main + our patches + this workflow) onto the
 #      new `main`. On clean rebase: force-push with lease. On conflict: open an
 #      issue tagged `upstream-conflict` so we notice.
-#   3. Polls every upstream PR in the watch list. When one lands, or is closed
-#      without merging, opens an issue with the next step.
+#   3. Checks whether upstream main holds the commit or tag each patch in the
+#      watch list waits for; when it does, opens an issue with the next step.
 #
 # Triggered daily (06:00 UTC) and on demand via workflow_dispatch.
 # All ops run inside this fork; no upstream write access needed.
@@ -157,82 +157,93 @@ jobs:
               ].join('\n'),
             });
 
-  # The watch list, one JSON array: a row goes in with every cherry-pick, the
-  # same day it lands in YARILO_PATCHES.md. A patch in the table and not in
+  # The watch list, one JSON array of {want, topic}: `want` is the upstream
+  # commit (full sha) or tag our patch waits for. Upstream takes patches by
+  # mail on sr.ht, so there is no pull request to poll; the answer is whether
+  # sr.ht's main holds the change. A row goes in with every cherry-pick, the
+  # same day it lands in YARILO_PATCHES.md: a patch in the table and not in
   # this list is a patch nobody is watching. Empty while there are no patches;
-  # an empty matrix is an error in Actions, so watch-prs is skipped instead.
+  # an empty matrix is an error in Actions, so watch-upstream is skipped.
   watch-list:
     runs-on: ubuntu-latest
     outputs:
-      prs: ${{ steps.list.outputs.prs }}
+      rows: ${{ steps.list.outputs.rows }}
     steps:
       - id: list
-        run: echo 'prs=[]' >> "$GITHUB_OUTPUT"
+        run: echo 'rows=[]' >> "$GITHUB_OUTPUT"
 
-  watch-prs:
-    name: Watch upstream PRs (${{ matrix.pr.number }})
+  watch-upstream:
+    name: Watch upstream for ${{ matrix.row.topic }}
     needs: watch-list
-    if: needs.watch-list.outputs.prs != '[]'
+    if: needs.watch-list.outputs.rows != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pr: ${{ fromJSON(needs.watch-list.outputs.prs) }}
+        row: ${{ fromJSON(needs.watch-list.outputs.rows) }}
     steps:
-      - name: Check PR ${{ matrix.pr.number }} status
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch upstream with tags
+        run: |
+          git remote add upstream https://git.sr.ht/~rockorager/go-jmap
+          git fetch upstream main --tags
+
+      - name: Has upstream taken it?
+        id: check
+        env:
+          WANT: ${{ matrix.row.want }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${WANT}" >/dev/null; then
+            echo "landed=true" >> "$GITHUB_OUTPUT"
+            echo "at=tag ${WANT}" >> "$GITHUB_OUTPUT"
+          elif git cat-file -e "${WANT}^{commit}" 2>/dev/null &&
+               git merge-base --is-ancestor "${WANT}" upstream/main; then
+            echo "landed=true" >> "$GITHUB_OUTPUT"
+            echo "at=commit ${WANT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "landed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${WANT} is not in upstream main yet"
+          fi
+
+      - name: Open the drop issue
+        if: steps.check.outputs.landed == 'true'
         uses: actions/github-script@v8
         env:
-          PR_NUMBER: ${{ matrix.pr.number }}
-          PR_TOPIC: ${{ matrix.pr.topic }}
+          AT: ${{ steps.check.outputs.at }}
+          TOPIC: ${{ matrix.row.topic }}
         with:
           script: |
-            const prNumber = parseInt(process.env.PR_NUMBER, 10);
-            const prTopic = process.env.PR_TOPIC;
-            const label = `upstream-pr-${prNumber}`;
-            const pr = await github.rest.pulls.get({
-              owner: 'rockorager',
-              repo: 'go-jmap',
-              pull_number: prNumber,
-            });
-            core.info(`PR #${prNumber} (${prTopic}) state=${pr.data.state} merged=${pr.data.merged}`);
-            if (!pr.data.merged && pr.data.state !== 'closed') {
-              core.info('PR still open — no action');
-              return;
-            }
-            const marker = pr.data.merged ? 'merged' : 'closed-unmerged';
-            const issueTitle = `upstream-sync: PR #${prNumber} ${marker} — drop our cherry-pick`;
+            const at = process.env.AT;
+            const topic = process.env.TOPIC;
+            const title = `upstream-sync: upstream has ${at} (${topic}) — drop our cherry-pick`;
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'all',
-              labels: label,
-              per_page: 50,
+              labels: 'automation',
+              per_page: 100,
             });
-            if (existing.data.some(i => i.title === issueTitle)) {
+            if (existing.data.some(i => i.title === title)) {
               core.info('Tracking issue already exists — skipping');
               return;
             }
-            const body = pr.data.merged
-              ? [
-                  `Upstream **rockorager/go-jmap#${prNumber}** (${prTopic}) was merged (commit \`${pr.data.merge_commit_sha}\`).`,
-                  '',
-                  'Action items:',
-                  '- [ ] Bump the main mirror past the merge commit (this workflow does it on next run).',
-                  `- [ ] Drop PR #${prNumber}'s cherry-pick(s) from \`yarilo-patches\`.`,
-                  '- [ ] Update `YARILO_PATCHES.md` and remove the row from the watch list.',
-                  '- [ ] In yarilo `go.mod`, repoint `replace` to the upstream commit, or drop it when no patches remain and upstream tags a version we can use.',
-                ].join('\n')
-              : [
-                  `Upstream **rockorager/go-jmap#${prNumber}** (${prTopic}) was **closed without merge**.`,
-                  '',
-                  'We need a long-term plan: keep maintaining the cherry-pick on `yarilo-patches`, or pursue an alternative approach.',
-                ].join('\n');
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: issueTitle,
-              labels: [label, 'automation'],
-              body,
+              title,
+              labels: ['automation'],
+              body: [
+                `Upstream \`git.sr.ht/~rockorager/go-jmap\` main now holds ${at}, which our patch for ${topic} waits for.`,
+                '',
+                'Action items:',
+                '- [ ] Drop the cherry-pick from `yarilo-patches`.',
+                '- [ ] Remove the row from `YARILO_PATCHES.md` and from the watch list.',
+                '- [ ] In yarilo `go.mod`, repoint `replace` to the upstream commit, or drop it when no patches remain and upstream tags a version we can use.',
+              ].join('\n'),
             });
 
   # GitHub disables a scheduled workflow after 60 days without repository

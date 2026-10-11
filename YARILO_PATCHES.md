@@ -17,9 +17,10 @@ cherry-pick on top of `main`; when upstream takes it, the cherry-pick is
 dropped. With no patches, yarilo takes the upstream tag directly and has no
 `replace`; the `replace` onto this fork arrives with the first patch.
 
-| Upstream PR | Topic | Our commit | State |
+| Upstream change awaited (commit or tag) | Topic | Our commit | State |
 |:---|:---|:---|:---|
 
-Every row here has a row in the watch list of
-`.github/workflows/sync-upstream.yml`, added in the same change: a patch in this
-table and not in the list is a patch nobody is watching.
+Upstream takes patches by mail on sr.ht, so a row names the upstream commit or
+tag our patch waits for, not a pull request. Every row here has a row in the
+watch list of `.github/workflows/sync-upstream.yml`, added in the same change:
+a patch in this table and not in the list is a patch nobody is watching.
