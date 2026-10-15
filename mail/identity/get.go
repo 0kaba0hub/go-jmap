@@ -2,6 +2,7 @@ package identity
 
 import (
 	"git.sr.ht/~rockorager/go-jmap"
+	"git.sr.ht/~rockorager/go-jmap/internal/getids"
 	"git.sr.ht/~rockorager/go-jmap/mail/emailsubmission"
 )
 
@@ -17,6 +18,12 @@ type Get struct {
 	ReferenceIDs *jmap.ResultReference `json:"#ids,omitempty"`
 
 	ReferenceProperties *jmap.ResultReference `json:"#properties,omitempty"`
+}
+
+// MarshalJSON keeps an empty ids as [] and sends "#ids" without "ids".
+func (m Get) MarshalJSON() ([]byte, error) {
+	type get Get
+	return getids.Marshal(get(m), m.IDs, m.ReferenceIDs)
 }
 
 func (m *Get) Name() string { return "Identity/get" }

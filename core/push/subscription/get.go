@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"git.sr.ht/~rockorager/go-jmap"
+	"git.sr.ht/~rockorager/go-jmap/internal/getids"
 )
 
 // Get push subscription details
@@ -9,6 +10,12 @@ import (
 type Get struct {
 	IDs        []jmap.ID `json:"ids,omitempty"`
 	Properties []string  `json:"properties,omitempty"`
+}
+
+// MarshalJSON keeps an empty ids as [] and sends "#ids" without "ids".
+func (m Get) MarshalJSON() ([]byte, error) {
+	type get Get
+	return getids.Marshal(get(m), m.IDs, nil)
 }
 
 func (m *Get) Name() string { return "PushSubscription/get" }
