@@ -176,7 +176,7 @@ jobs:
       rows: ${{ steps.list.outputs.rows }}
     steps:
       - id: list
-        run: echo 'rows=[]' >> "$GITHUB_OUTPUT"
+        run: echo 'rows=[{"want":"v0.5.4","topic":"blob upload accepts any 2xx"}]' >> "$GITHUB_OUTPUT"
 
   watch-upstream:
     name: Watch upstream for ${{ matrix.row.topic }}
