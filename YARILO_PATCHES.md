@@ -20,7 +20,7 @@ dropped. With no patches, yarilo takes the upstream tag directly and has no
 | Upstream change awaited (commit or tag) | Topic | Our commit | State |
 |:---|:---|:---|:---|
 | `v0.5.4` | Blob upload accepts any 2xx, not only 200 (RFC 8620 §6.1; yarilo answers 201) | cherry-pick of `25f7b38d` from the stale GitHub repo | not on sr.ht; the change would arrive there under another sha, so the next tag is watched and checked by hand |
-| `v0.5.5` | A /get request sends an empty ids as `[]` and `#ids` without `ids` (RFC 8620 §3.7, §5.1) | ours, to be mailed upstream | the change would arrive there under another sha, so the next tag is watched and checked by hand |
+| `v0.5.5` | A /get request sends an empty ids as `[]` and `#ids` without `ids` (RFC 8620 §3.7, §5.1) | ours; dropped when upstream fixes the same | the change would arrive there under another sha, so the next tag is watched and checked by hand |
 
 Upstream takes patches by mail on sr.ht, so a row names the upstream commit or
 tag our patch waits for, not a pull request. Every row here has a row in the
