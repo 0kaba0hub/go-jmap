@@ -176,7 +176,8 @@ jobs:
       rows: ${{ steps.list.outputs.rows }}
     steps:
       - id: list
-        run: echo 'rows=[{"want":"v0.5.4","topic":"blob upload accepts any 2xx"},{"want":"v0.5.5","topic":"get sends ids [] and #ids alone"}]' >> "$GITHUB_OUTPUT"
+        run: |
+          echo 'rows=[{"want":"v0.5.4","topic":"blob upload accepts any 2xx"},{"want":"v0.5.5","topic":"get sends ids [] and #ids alone"}]' >> "$GITHUB_OUTPUT"
 
   watch-upstream:
     name: Watch upstream for ${{ matrix.row.topic }}
